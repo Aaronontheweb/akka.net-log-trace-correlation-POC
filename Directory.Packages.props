@@ -1,17 +1,32 @@
 <Project>
   <PropertyGroup>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
-    <!-- Nuget package versions -->
-    <AkkaHostingVersion>1.5.57</AkkaHostingVersion>
+    <!-- NuGet package versions -->
+    <AkkaVersion>1.5.31</AkkaVersion>
+    <OpenTelemetryVersion>1.9.0</OpenTelemetryVersion>
+    <MicrosoftExtensionsVersion>8.0.0</MicrosoftExtensionsVersion>
   </PropertyGroup>
-  <!-- App dependencies -->
+
+  <!-- Akka.NET dependencies -->
   <ItemGroup>
-    <PackageVersion Include="Akka.Hosting" Version="$(AkkaHostingVersion)"/>
-    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="10.0.0"/>
+    <PackageVersion Include="Akka" Version="$(AkkaVersion)" />
   </ItemGroup>
-  <!-- Test dependencies -->
-  <!-- SourceLink support for all Akka.NET projects -->
+
+  <!-- Microsoft.Extensions dependencies -->
   <ItemGroup>
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0"/>
+    <PackageVersion Include="Microsoft.Extensions.Hosting" Version="$(MicrosoftExtensionsVersion)" />
+    <PackageVersion Include="Microsoft.Extensions.Logging" Version="$(MicrosoftExtensionsVersion)" />
+  </ItemGroup>
+
+  <!-- OpenTelemetry dependencies -->
+  <ItemGroup>
+    <PackageVersion Include="OpenTelemetry" Version="$(OpenTelemetryVersion)" />
+    <PackageVersion Include="OpenTelemetry.Exporter.Console" Version="$(OpenTelemetryVersion)" />
+    <PackageVersion Include="OpenTelemetry.Extensions.Hosting" Version="$(OpenTelemetryVersion)" />
+  </ItemGroup>
+
+  <!-- SourceLink support -->
+  <ItemGroup>
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
   </ItemGroup>
 </Project>

@@ -1,70 +1,200 @@
-# build-system-template
-Akka.NET project build system template that provides standardized build and CI/CD configuration for all Akka.NET projects.
+# Akka.NET Log/Trace Correlation Proof of Concept
 
-## Build System Overview
-This repository contains our standardized build system setup that can be used across all Akka.NET projects. Here are the key components and practices we follow:
+This repository demonstrates how to correlate Akka.NET actor logs with OpenTelemetry traces, solving the problem that `Activity.Current` doesn't flow across actor mailbox boundaries.
 
-### CI/CD Configuration
-We primarily use GitHub Actions for our CI/CD pipelines, but also maintain Azure DevOps pipeline examples. You can find the configuration examples in:
-- `.github/workflows/` - GitHub Actions pipeline examples
-- `.azuredevops/` - Azure DevOps pipeline examples
+**Related Issue**: [akkadotnet/akka.net#6855](https://github.com/akkadotnet/akka.net/issues/6855)
 
-### SDK Version Management
-We use `global.json` to pin the .NET SDK version for both CI/CD environments and local development. This ensures consistent builds across all environments and developers.
+## The Problem
 
-### .NET Tools
-We use local .NET tools to enhance our build and documentation process. The tools are configured in `.config/dotnet-tools.json` and include:
+When using Akka.NET with OpenTelemetry, logs generated inside actors don't correlate with the parent trace because:
 
-- [Incrementalist](https://github.com/petabridge/Incrementalist) (v1.0.0-beta4) - Used for determining which projects need to be rebuilt based on Git changes
-- [DocFx](https://dotnet.github.io/docfx/) (v2.78.3) - Used for generating documentation
+1. `Activity.Current` uses `AsyncLocal<T>` for context propagation
+2. Actor mailboxes schedule message processing on thread pool threads
+3. `AsyncLocal<T>` doesn't flow across the `Tell()` boundary
+4. Result: `Activity.Current` is `null` when the actor processes the message
 
-To restore these tools in your local environment, run:
-```powershell
-dotnet tool restore
+## The Solution
+
+This PoC demonstrates the **LogRecordProcessor approach**:
+
+1. **Capture** `ActivityContext` at message send time (before mailbox crossing)
+2. **Pass** it through `ILogger` as structured state (`AkkaLogState`)
+3. **Extract** it in `AkkaTraceContextProcessor` and set `LogRecord.TraceId/SpanId` directly
+
+**Key insight**: We don't create `Activity` objects (which would generate child spans). We set `LogRecord.TraceId` and `LogRecord.SpanId` directly, preserving the **exact original TraceId AND SpanId**.
+
+## Why Not Use `Activity.SetParentId()`?
+
+A previous approach tried creating a temporary `Activity` with `SetParentId()`:
+
+```csharp
+// DON'T DO THIS - Creates child spans!
+var tempActivity = new Activity("Context");
+tempActivity.SetParentId(ctx.TraceId, ctx.SpanId, ctx.TraceFlags);
+tempActivity.Start();
+// tempActivity.SpanId is a NEW RANDOM ID, not ctx.SpanId!
 ```
 
-This command is automatically executed in our CI/CD pipelines (both GitHub Actions and Azure DevOps) to ensure tools are available during builds.
+This creates **child spans** with new SpanIds, defeating trace correlation. Multiple logs would have different SpanIds.
 
-### Centralized Package and Build Management
-We utilize two key MSBuild files for centralized configuration:
+## Key Components
 
-1. `Directory.Packages.props` - Implements [Central Package Version Management](https://learn.microsoft.com/nuget/consume-packages/Central-Package-Management) for consistent NuGet package versions across all projects in the solution.
+### AkkaLogState
 
-2. `Directory.Build.props` - Defines common build properties, including:
-   - Copyright and author information
-   - Source linking configuration
-   - NuGet package metadata
-   - Common compiler settings
-   - Target framework definitions
+A struct implementing `IReadOnlyList<KeyValuePair<string, object?>>` that captures trace context:
 
-### Code Coverage Configuration
-The `coverlet.runsettings` file configures code coverage collection using Coverlet, with settings for:
-- Multiple coverage report formats (JSON, Cobertura, LCOV, TeamCity, OpenCover)
-- Test assembly exclusions
-- Source linking integration
-- Performance optimizations
-
-### Release Management
-Our release process is streamlined through:
-- `RELEASE_NOTES.md` - Contains version history and release notes
-- `build.ps1` - PowerShell script that processes release notes and updates version information
-- Supporting scripts in `/scripts`:
-  - `bumpVersion.ps1` - Updates version numbers
-  - `getReleaseNotes.ps1` - Parses release notes
-
-The build system primarily relies on standard `dotnet` CLI commands, with the PowerShell scripts mainly handling release note processing and version management.
-
-### Solution Format
-We prefer the new `.slnx` XML-based solution format over the traditional `.sln` format. This requires .NET 9 SDK or later. The new format is more concise and easier to work with. You can migrate existing solutions using:
-
-```powershell
-dotnet sln migrate
+```csharp
+var state = new AkkaLogState(activityContext, "Log message");
+logger.Log(LogLevel.Information, new EventId(), state, null, (s, _) => s.ToString());
 ```
 
-For more information about the new `.slnx` format, see the [official announcement](https://devblogs.microsoft.com/dotnet/introducing-slnx-support-dotnet-cli/).
+### AkkaTraceContextProcessor
 
-## Getting Started
-1. Ensure you have the correct .NET SDK version installed (check `global.json`)
-2. Clone this repository
-3. Run `dotnet build` to verify the build system
-4. Customize the configuration files for your specific project needs
+A `BaseProcessor<LogRecord>` that extracts trace context from log attributes and sets it directly:
+
+```csharp
+public override void OnEnd(LogRecord logRecord)
+{
+    // Extract from attributes
+    var traceId = ExtractTraceId(logRecord.Attributes);
+    var spanId = ExtractSpanId(logRecord.Attributes);
+
+    // Set DIRECTLY - no Activity creation!
+    logRecord.TraceId = traceId;
+    logRecord.SpanId = spanId;
+}
+```
+
+## Usage
+
+### Configuration
+
+```csharp
+builder.Logging.AddOpenTelemetry(options =>
+{
+    // Register processor FIRST (before exporters)
+    options.AddProcessor(new AkkaTraceContextProcessor());
+
+    // Required to parse AkkaLogState
+    options.ParseStateValues = true;
+
+    // Add your exporter
+    options.AddOtlpExporter();
+});
+```
+
+### Logging with Trace Context
+
+```csharp
+// In your actor
+public class MyActor : ReceiveActor
+{
+    private readonly ILogger _logger;
+
+    public MyActor(ILogger<MyActor> logger)
+    {
+        _logger = logger;
+
+        Receive<TracedMessage>(msg =>
+        {
+            var state = new AkkaLogState(msg.TraceContext, $"Processing {msg.Content}");
+            _logger.Log(LogLevel.Information, new EventId(), state, null, (s, _) => s.ToString());
+        });
+    }
+}
+```
+
+## Running the Demo
+
+```bash
+dotnet run --project src/Akka.LogTraceCorrelation
+```
+
+Expected output shows all logs have the **same TraceId AND SpanId** as the original Activity:
+
+```
+╔════════════════════════════════════════════════════════════════╗
+║  Akka.NET Log/Trace Correlation Proof of Concept               ║
+╚════════════════════════════════════════════════════════════════╝
+
+┌─────────────────────────────────────────────────────────────────┐
+│ ORIGINAL Activity:                                              │
+│ TraceId:    abc123...                                           │
+│ SpanId:     def456...                                           │
+└─────────────────────────────────────────────────────────────────┘
+
+LogRecord.TraceId: abc123...  ✅ MATCHES
+LogRecord.SpanId:  def456...  ✅ MATCHES
+```
+
+## Integration with Akka.NET Core
+
+To integrate this approach into Akka.NET:
+
+### Phase 1: Core Changes (`Akka.NET`)
+
+Add trace context capture to `LogEvent`:
+
+```csharp
+public abstract class LogEvent
+{
+    public ActivityTraceId? TraceId { get; }
+    public ActivitySpanId? SpanId { get; }
+    public ActivityTraceFlags TraceFlags { get; }
+
+    protected LogEvent()
+    {
+        var activity = Activity.Current;
+        if (activity != null)
+        {
+            TraceId = activity.TraceId;
+            SpanId = activity.SpanId;
+            TraceFlags = activity.ActivityTraceFlags;
+        }
+    }
+}
+```
+
+### Phase 2: Hosting Changes (`Akka.Hosting`)
+
+Update `LoggerFactoryLogger` to use `AkkaLogState`:
+
+```csharp
+protected virtual void Log(LogEvent log, ActorPath path)
+{
+    if (log.TraceId.HasValue && log.SpanId.HasValue)
+    {
+        var state = new AkkaLogState(log.TraceId.Value, log.SpanId.Value,
+                                      log.TraceFlags, log.Message.ToString());
+        _logger.Log(GetLogLevel(log), new EventId(), state, log.Cause,
+                    (s, _) => s.ToString());
+    }
+    else
+    {
+        // Fall back to standard logging
+        _akkaLogger.Log(GetLogLevel(log), log.Message);
+    }
+}
+```
+
+## Other Logging Backends
+
+| Backend | Native OTLP Correlation | Approach |
+|---------|------------------------|----------|
+| **LoggerFactoryLogger** | ✅ Yes | Use `AkkaTraceContextProcessor` |
+| **Serilog → MEL** | ✅ Yes | Route through MEL + processor |
+| **Serilog → Direct OTLP** | ❌ Attributes only | Use `LogContext.PushProperty` |
+| **NLog → MEL** | ✅ Yes | Route through MEL + processor |
+| **NLog → Direct OTLP** | ❌ Attributes only | Use `ScopeContext.PushProperty` |
+
+For native OpenTelemetry `LogRecord.TraceId/SpanId` correlation (not just attributes), route all backends through `Microsoft.Extensions.Logging` with `AkkaTraceContextProcessor`.
+
+## References
+
+- [GitHub Issue #6855](https://github.com/akkadotnet/akka.net/issues/6855) - Original issue
+- [dotnet/runtime#86966](https://github.com/dotnet/runtime/issues/86966) - ActivityContext.Current proposal
+- [opentelemetry-dotnet#6085](https://github.com/open-telemetry/opentelemetry-dotnet/issues/6085) - Pass ActivityContext to ILogger
+
+## License
+
+Apache 2.0 - See [LICENSE](LICENSE) for details.

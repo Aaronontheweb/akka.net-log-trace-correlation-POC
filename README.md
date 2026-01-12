@@ -65,7 +65,78 @@ public override void OnEnd(LogRecord logRecord)
 }
 ```
 
-## Usage
+## Future API (Akka.Hosting Integration)
+
+Once integrated into Akka.Hosting, configuration will be a single line:
+
+```csharp
+using Akka.Hosting;
+using Akka.Hosting.Logging;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Logging.AddOpenTelemetry(options =>
+{
+    options.AddAkkaTraceCorrelation();  // One line - that's it
+    options.AddOtlpExporter();
+});
+
+builder.Services.AddAkka("MySystem", configBuilder =>
+{
+    configBuilder
+        .ConfigureLoggers(setup =>
+        {
+            setup.ClearLoggers();
+            setup.AddLoggerFactory();
+        })
+        .WithActors((system, registry) =>
+        {
+            registry.Register<OrderActor>();
+        });
+});
+
+await builder.Build().RunAsync();
+```
+
+The extension method:
+
+```csharp
+// Shipped as part of Akka.Hosting
+namespace Akka.Hosting.Logging;
+
+public static class AkkaOpenTelemetryExtensions
+{
+    /// <summary>
+    /// Adds Akka.NET trace correlation support to OpenTelemetry logging.
+    /// This enables logs from actors to be correlated with their parent trace/span.
+    /// </summary>
+    public static OpenTelemetryLoggerOptions AddAkkaTraceCorrelation(
+        this OpenTelemetryLoggerOptions options)
+    {
+        options.AddProcessor(new AkkaTraceContextProcessor());
+        return options;
+    }
+}
+```
+
+Actor code stays unchanged - trace correlation happens automatically:
+
+```csharp
+public class OrderActor : ReceiveActor
+{
+    private readonly ILoggingAdapter _log = Context.GetLogger();
+
+    public OrderActor()
+    {
+        Receive<ProcessOrder>(order =>
+        {
+            _log.Info("Processing order {0}", order.Id);  // Automatically correlated
+        });
+    }
+}
+```
+
+## Current Usage (This PoC)
 
 ### Configuration
 
@@ -74,11 +145,6 @@ builder.Logging.AddOpenTelemetry(options =>
 {
     // Register processor FIRST (before exporters)
     options.AddProcessor(new AkkaTraceContextProcessor());
-
-    // Required to parse AkkaLogState
-    options.ParseStateValues = true;
-
-    // Add your exporter
     options.AddOtlpExporter();
 });
 ```
@@ -86,7 +152,7 @@ builder.Logging.AddOpenTelemetry(options =>
 ### Logging with Trace Context
 
 ```csharp
-// In your actor
+// In this PoC, trace context is passed explicitly via TracedMessage
 public class MyActor : ReceiveActor
 {
     private readonly ILogger _logger;

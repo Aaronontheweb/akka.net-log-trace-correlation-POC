@@ -46,11 +46,7 @@ builder.Logging.AddOpenTelemetry(options =>
     // CRITICAL: Register our processor FIRST to set TraceId/SpanId
     // before any exporters process the LogRecord
     options.AddProcessor(new AkkaTraceContextProcessor());
-
-    // Parse state values to capture our custom AkkaLogState attributes
-    options.ParseStateValues = true;
-    options.IncludeFormattedMessage = true;
-    options.IncludeScopes = true;
+    
 
     // Export to console for visibility
     options.AddConsoleExporter();

@@ -4,7 +4,7 @@
     <!-- NuGet package versions -->
     <AkkaVersion>1.5.31</AkkaVersion>
     <OpenTelemetryVersion>1.9.0</OpenTelemetryVersion>
-    <MicrosoftExtensionsVersion>8.0.0</MicrosoftExtensionsVersion>
+    <MicrosoftExtensionsVersion>10.0.1</MicrosoftExtensionsVersion>
   </PropertyGroup>
 
   <!-- Akka.NET dependencies -->
